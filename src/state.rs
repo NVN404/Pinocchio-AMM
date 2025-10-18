@@ -103,6 +103,20 @@ pub fn config_bump(&self) -> &[u8; 1]{&self.config_bump}
 
     }
 
+     #[inline(always)]
+    pub unsafe fn load_mut_unchecked(
+        account_info: &AccountInfo,
+    ) -> Result<&mut Self, ProgramError> {
+        if account_info.data_len() != Self::LEN {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        if account_info.owner() != &crate::ID {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        Ok(Self::from_bytes_unchecked_mut(
+            account_info.borrow_mut_data_unchecked(),
+        ))
+    }
     #[inline(always)]Q
     pub fn set_state(&mut self , state : u8) -> Result<(), ProgramError>{
         if state.ge(&(AmmState::WithdrawOnly as u8)){

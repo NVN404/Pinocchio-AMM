@@ -1,0 +1,147 @@
+use crate::state::Config;
+use core::mem::{size_of, MaybeUninit};
+use pinocchio::{
+    account_info::AccountInfo,
+    instruction::{Seed, Signer},
+    program_error::ProgramError,
+    sysvars::{rent::Rent, Sysvar},
+    ProgramResult
+};
+use pinocchio_system::instructions::CreateAccount;
+use pinocchio_token::{instructions::InitializeMint2, state::Mint};
+
+
+
+pub struct InitializeAccounts<'a>{
+    pub initializer : &'a AccountInfo,
+    pub mint_lp : &'a AccountInfo,
+    pub config : &'a AccountInfo,
+}
+
+impl<'a> TryFrom<& 'a [AccountInfo]> for InitializeAccounts<'a>{
+    type Error = ProgramError;
+
+    fn try_from(accounts : &'a [AccountInfo]) -> Result<Self, Self::Error>{ 
+        let [initializer,mint_lp, config , _system_program, _token_program] = accounts else{
+            return Err(ProgramError::NotEnoughAccountKeys);
+        };
+        Ok(Self{
+            initializer,
+            mint_lp,
+            config,
+        })
+
+    }
+}
+#[repr(C, packed)]
+pub struct InitializeInstructionData {
+    pub seed: u64,
+    pub fee: u16,
+    pub mint_x: [u8; 32],
+    pub mint_y: [u8; 32],
+    pub config_bump: [u8; 1],
+    pub lp_bump: [u8; 1],
+    pub authority: [u8; 32],
+}
+
+    impl TryFrom<&[u8]> for InitializeInstructionData{
+        type Error = ProgramError;
+
+        fn try_from(data : &[u8]) -> Result<Self,Self::Error>{
+            const INITIALIZE_DATA_LEN_WITH_AUTHORITY : usize = size_of::<InitializeInstructionData>();
+            const INITIALIZE_DATA_LEN : usize = INITIALIZE_DATA_LEN_WITH_AUTHORITY - size_of::<[u8;32]>();
+
+            match data.len(){
+                INITIALIZE_DATA_LEN_WITH_AUTHORITY => {Ok(unsafe { (data.as_ptr() as *const Self).read_unaligned() })}
+                INITIALIZE_DATA_LEN => {
+                    let mut raw : MaybeUninit<[u8 ; INITIALIZE_DATA_LEN_WITH_AUTHORITY]> = MaybeUninit::uninit();
+                    let raw_ptr = raw.as_mut_ptr() as *mut u8 ;
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(data.as_ptr(), raw_ptr , INITIALIZE_DATA_LEN);
+
+                        core::ptr::write_bytes(raw_ptr.add(INITIALIZE_DATA_LEN), 0, 32);
+
+                        Ok((raw.as_ptr() as *const Self).read_unaligned())
+                        
+                    }
+                }
+                 _ => Err(ProgramError::InvalidInstructionData),
+            }
+
+        }
+    }
+
+   
+
+    pub struct Initialize<'a>{
+    pub accounts : InitializeAccounts<'a>,
+    pub instruction_data : InitializeInstructionData,
+
+    }
+
+    impl<'a> Initialize<'a>{
+    pub const DISCRIMINATOR : &'a  u8 = &0;
+        pub fn process(&mut self) -> ProgramResult{
+
+             let seed_binding = self.instruction_data.seed.to_le_bytes();
+    let config_seed = [
+        Seed::from(b"config"),
+        Seed::from(&seed_binding),
+        Seed::from(&self.instruction_data.mint_x),
+        Seed::from(&self.instruction_data.mint_y),
+        Seed::from(&self.instruction_data.config_bump),
+    ];
+            let config_lamports = Rent::get()?.minimum_balance(Config::LEN);
+
+            CreateAccount{
+                from : self.accounts.initializer,
+                to : self.accounts.config,
+                lamports : config_lamports,
+                space : Config::LEN as u64,
+                owner : &crate::ID,
+            }.invoke_signed(&[Signer::from(&config_seed)])?;
+
+            let config =unsafe{Config::load_mut_unchecked(self.accounts.config)};
+    
+
+
+        config.set_inner(
+            self.instruction_data.seed,
+            self.instruction_data.authority,
+            self.instruction_data.mint_x,
+            self.instruction_data.mint_y,
+            self.instruction_data.fee,
+            self.instruction_data.config_bump,
+        )?;
+        let mint_lp_seeds = [
+        Seed::from(b"lp_mint"),
+        Seed::from(self.accounts.config.key()),
+        Seed::from(&self.instruction_data.lp_bump),
+    ];
+
+    let mint_size = Mint::LEN;
+    let mint_lamports = Rent::get()?.minimum_balance(mint_size);
+
+    CreateAccount{
+        from : self.accounts.initializer,
+        to : self.accounts.mint_lp,
+        lamports : mint_lamports,
+        space : mint_size as u64,
+        owner : &pinocchio_token::ID,
+    }.invoke_signed(&[Signer::from(&mint_lp_seeds)])?;
+
+    InitializeMint2{
+        mint: self.accounts.mint_lp,
+        decimals :6 ,
+        mint_authority : self.accounts.config.key(),
+        freeze_authority : None,
+    }.invoke_signed(&[Signer::from(&mint_lp_seeds)])?;
+
+
+
+            Ok(())
+        }
+
+    
+       
+    }
